@@ -1,0 +1,36 @@
+# Python virtual environment (Crucial to ignore)
+venv/
+.env/
+env/
+__pycache__/
+*.pyc
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+
+# Jupyter Notebook checkpoints (if you use notebooks for testing)
+.ipynb_checkpoints
+
+# IDE settings (VS Code, PyCharm)
+.vscode/
+.idea/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# Audio files (Don't commit test data to git)
+*.mp3
+*.wav
+*.flac
+
+# Local environment variables (API Keys, etc.)
+.env
+
+# Large Model files (If you add a real AI model later)
+*.h5
+*.pt
+*.pth
+*.onnx
