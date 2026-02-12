@@ -6,8 +6,9 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
+from scipy.stats import entropy
 
-app = FastAPI(title="Echolyze AI Voice Detector")
+app = FastAPI(title="Echolyze AI Voice Detector", version="2.0")
 
 # --- Data Models ---
 class AudioRequest(BaseModel):
@@ -21,128 +22,135 @@ class AnalysisResponse(BaseModel):
     confidenceScore: float
     explanation: str
 
-# --- Advanced Audio Analysis Logic ---
-def analyze_signal_properties(audio_bytes):
+# --- Advanced Forensic Analysis ---
+def forensic_analysis(audio_bytes):
     try:
-        # Load audio (y = audio time series, sr = sample rate)
+        # 1. Load Audio
+        # We use a specific sample rate (sr=None) to capture the original quality
         y, sr = librosa.load(io.BytesIO(audio_bytes), sr=None)
         
-        # --- Feature 1: Silence/Noise Floor Analysis ---
-        # AI audio often has "digital silence" (absolute 0) between words.
-        # Human recordings usually have background noise/hiss.
-        noise_floor = np.min(np.abs(y[y != 0])) if np.any(y) else 0
-        has_digital_silence = noise_floor < 1e-5
+        # 2. Safety Check for empty/short audio
+        if len(y) < sr * 0.5: # Less than 0.5 seconds
+            return "UNKNOWN", 0.0, "Audio is too short for reliable forensic analysis."
 
-        # --- Feature 2: Spectral Flatness (Tonality) ---
-        # High flatness = noise-like. Low flatness = tonal.
-        # AI models sometimes over-smooth the spectrum.
-        flatness = np.mean(librosa.feature.spectral_flatness(y=y))
+        # --- FEATURE 1: High Frequency Bandwidth (The "Cutoff" Test) ---
+        # Real human voices have energy all the way up to 20kHz (if recorded on good mics).
+        # Many AI models (Tacotron/WaveNet) cut off sharply at 11kHz or 8kHz.
+        spec = np.abs(librosa.stft(y))
+        # Calculate energy in high freq bands (above 11kHz)
+        freqs = librosa.fft_frequencies(sr=sr)
+        high_freq_idx = np.where(freqs > 11000)[0]
+        if len(high_freq_idx) > 0:
+            high_freq_energy = np.mean(spec[high_freq_idx, :])
+            total_energy = np.mean(spec)
+            hf_ratio = high_freq_energy / (total_energy + 1e-6)
+        else:
+            hf_ratio = 0.0
 
-        # --- Feature 3: MFCC Variance (Vocal Texture) ---
-        # Human voices have complex, chaotic micro-tremors.
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-        mfcc_var = np.mean(np.var(mfccs, axis=1))
+        # --- FEATURE 2: Digital Silence (The "Zero" Test) ---
+        # Real microphones have "noise floor" (air hiss). AI generates absolute zeros.
+        # We check the percentage of samples that are EXACTLY 0.0
+        zero_samples = np.sum(y == 0)
+        total_samples = len(y)
+        silence_ratio = zero_samples / total_samples
 
-        # --- Feature 4: High Frequency Cutoff ---
-        # Some older AI models cut off frequencies above 16kHz sharply.
-        spec_cent = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
+        # --- FEATURE 3: Spectral Entropy (Complexity) ---
+        # Human voice is chaotic and complex (High Entropy).
+        # AI voice is mathematically generated and more ordered (Low Entropy).
+        # We normalize the power spectrum and calculate Shannon entropy
+        power_spec = np.mean(spec, axis=1)
+        power_spec_norm = power_spec / (np.sum(power_spec) + 1e-9)
+        spec_entropy = entropy(power_spec_norm)
 
-        # --- SCORING LOGIC ---
-        ai_probability = 0.0
+        # --- SCORING ENGINE ---
+        ai_score = 0.0
         reasons = []
 
-        # Check 1: Unnatural Silence
-        if has_digital_silence:
-            ai_probability += 0.30
-            reasons.append("Detected unnatural digital silence between speech segments.")
-        else:
-            reasons.append("Natural background noise floor detected.")
+        # 1. Analyze Silence (Strong Indicator)
+        if silence_ratio > 0.05: # More than 5% absolute silence
+            ai_score += 0.40
+            reasons.append(f"Contains unnatural digital silence ({silence_ratio*100:.1f}% samples are perfect zeros).")
+        
+        # 2. Analyze High Frequencies
+        # Humans usually have hf_ratio > 0.05 on standard mics. AI is often < 0.01
+        if hf_ratio < 0.002: 
+            ai_score += 0.35
+            reasons.append("Severe lack of high-frequency information (Audio cuts off unnaturally).")
+        elif hf_ratio < 0.01:
+            ai_score += 0.15
+            reasons.append("Weak high-frequency presence typical of upsampled AI audio.")
 
-        # Check 2: Spectral Consistency (Robotic smoothness)
-        if mfcc_var < 500:  # Threshold for "too smooth"
-            ai_probability += 0.25
-            reasons.append(f"Vocal texture lacks natural human jitter (Low MFCC Variance: {mfcc_var:.1f}).")
-        
-        # Check 3: Spectral Flatness
-        if flatness < 0.002:
-            ai_probability += 0.20
-            reasons.append("Audio spectrum is unusually distinct and lacks organic complexity.")
+        # 3. Analyze Entropy (The "Texture" Test)
+        # Typical Human Entropy > 5.0 (depending on bin count, but relative is key)
+        # If entropy is suspiciously low, it's likely synthetic.
+        if spec_entropy < 4.0: 
+            ai_score += 0.25
+            reasons.append(f"Spectral complexity is low ({spec_entropy:.2f}), suggesting algorithmic generation.")
 
-        # Check 4: Frequency Range
-        if spec_cent > 3500:
-            ai_probability += 0.15 # AI often overly "bright" or consistent in high freq
+        # --- FINAL CLASSIFICATION ---
         
-        # --- FINAL DECISION ---
-        # Normalize score to 0.0 - 1.0 range
-        final_score = min(ai_probability, 0.99)
-        
-        if final_score > 0.55:
+        # Base decision threshold
+        if ai_score > 0.45:
             classification = "AI GENERATED"
-            # Confidence is how far above 0.55 we are
-            confidence = 0.70 + (final_score * 0.25)
-            main_reason = "The audio exhibits statistical regularities typical of synthesis algorithms."
+            # Confidence calculation: Map score 0.45-1.0 to 75%-99%
+            confidence = min(0.75 + (ai_score - 0.45), 0.99)
+            main_explanation = "The audio signal lacks the acoustic complexity of organic speech."
         else:
             classification = "HUMAN"
-            # Confidence is how far below 0.55 we are
-            confidence = 0.85 - (final_score * 0.3)
-            main_reason = "The audio contains micro-tremors and noise patterns consistent with organic recording."
+            # Confidence calculation: Map score 0.45-0.0 to 70%-98%
+            confidence = min(0.70 + (0.45 - ai_score), 0.98)
+            main_explanation = "The audio contains natural noise floors and frequency richness consistent with human recording."
 
-        # Combine explanation
-        full_explanation = f"{main_reason} Specifics: {' '.join(reasons)}"
-        
-        return classification, round(confidence, 2), full_explanation
+        # Fallback if no specific reasons found but score was low
+        if not reasons and classification == "AI GENERATED":
+            reasons.append("Signal statistical properties align with synthetic training data.")
+
+        final_explanation = f"{main_explanation} Key factors: {' '.join(reasons)}"
+
+        return classification, round(confidence, 2), final_explanation
 
     except Exception as e:
-        return "UNKNOWN", 0.0, f"Error analyzing audio: {str(e)}"
+        # Fallback for corrupted audio
+        return "UNKNOWN", 0.0, f"Error during forensic analysis: {str(e)}"
 
-# --- 1. ROOT ENDPOINT (HTML Interface) ---
+# --- ENDPOINTS ---
+
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    return """
-    <html>
-        <head>
-            <title>Echolyze API Test</title>
-            <style>
-                body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f4f4f9; }
-                h1 { color: #333; }
-                .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-                textarea { width: 100%; height: 100px; margin-bottom: 10px; }
-                button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
-                button:hover { background: #0056b3; }
-                #result { margin-top: 20px; padding: 10px; border: 1px solid #ddd; background: #fafafa; white-space: pre-wrap;}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>Echolyze AI Detector</h1>
-                <p>This is the API root. Use the <b>/analyze</b> endpoint for JSON requests.</p>
-                <p>Status: <span style="color: green; font-weight: bold;">ACTIVE</span></p>
-            </div>
-        </body>
-    </html>
-    """
+    return 
 
-# --- 2. ANALYZE ENDPOINT ---
 @app.post("/analyze", response_model=AnalysisResponse)
 async def analyze_audio(request: AudioRequest):
     if not request.audio_base64:
-        raise HTTPException(status_code=400, detail="No audio data provided")
+        raise HTTPException(status_code=400, detail="Audio data is missing")
     
-    # Analyze
     try:
-        audio_bytes = base64.b64decode(request.audio_base64)
-        classification, confidence, explanation = analyze_signal_properties(audio_bytes)
+        # Decode Base64
+        try:
+            audio_bytes = base64.b64decode(request.audio_base64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid Base64 string")
+
+        # Perform Forensic Analysis
+        classification, confidence, explanation = forensic_analysis(audio_bytes)
         
         return {
             "status": "success",
-            "language": request.language,
+            "language": request.language if request.language else "Detected",
             "classification": classification,
             "confidenceScore": confidence,
             "explanation": explanation
         }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "status": "error",
+            "language": request.language,
+            "classification": "UNKNOWN",
+            "confidenceScore": 0.0,
+            "explanation": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="
