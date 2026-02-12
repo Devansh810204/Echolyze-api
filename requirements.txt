@@ -2,7 +2,7 @@ fastapi
 uvicorn
 librosa
 numpy
-soundfile
+scipy
 pydantic
 python-multipart
-requests
+soundfile
